@@ -17,7 +17,19 @@ logger = logging.getLogger(__name__)
 # Constants from environment variables
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+
+if not OPENAI_API_KEY:
+    logger.error("OPENAI_API_KEY not found in environment variables. Please set it in the .env file.")
+    exit(1)
 CHANNEL_ID = os.getenv('CHANNEL_ID')
+
+if not TELEGRAM_TOKEN:
+    logger.error("TELEGRAM_TOKEN not found in environment variables. Please set it in the .env file.")
+    exit(1)
+
+if not CHANNEL_ID:
+    logger.error("CHANNEL_ID not found in environment variables. Please set it in the .env file.")
+    exit(1)
 
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
