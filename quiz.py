@@ -1,6 +1,8 @@
 import os
 import asyncio
 import logging
+import json
+import hashlib
 from datetime import datetime
 from telegram import Bot, Poll
 from telegram.error import TelegramError
@@ -34,17 +36,97 @@ if not CHANNEL_ID:
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# Path to store asked questions
+QUESTIONS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'asked_questions.json')
+
+# Initialize or load the questions database
+def load_questions_db():
+    if os.path.exists(QUESTIONS_DB_PATH):
+        try:
+            with open(QUESTIONS_DB_PATH, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            logger.error("Error decoding questions database, creating new one")
+            return {"questions": []}
+    else:
+        return {"questions": []}
+
+# Save questions to database
+def save_question_to_db(question):
+    db = load_questions_db()
+    
+    # Create a hash of the question to use as a unique identifier
+    question_hash = hashlib.md5(question.encode('utf-8')).hexdigest()
+    
+    # Check if this question (or very similar) has been asked before
+    for q in db["questions"]:
+        if q["hash"] == question_hash:
+            logger.info("Question has been asked before, not saving")
+            return False
+    
+    # Add the new question
+    db["questions"].append({
+        "hash": question_hash,
+        "question": question,
+        "date_added": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+    
+    # Save the updated database
+    with open(QUESTIONS_DB_PATH, 'w', encoding='utf-8') as f:
+        json.dump(db, f, ensure_ascii=False, indent=2)
+    
+    logger.info(f"Added new question to database. Total questions: {len(db['questions'])}")
+    return True
+
 async def generate_quiz_question():
     try:
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{
+        # Load previously asked questions to provide as context
+        db = load_questions_db()
+        
+        # Get the number of previously asked questions
+        num_previous_questions = len(db["questions"])
+        
+        # Create a context message with information about previously asked questions
+        context_message = {
+            "role": "system",
+            "content": f"You have previously generated {num_previous_questions} questions. Ensure you create a completely new and unique question that has not been asked before."
+        }
+        
+        # Main instruction message
+        instruction_message = {
+            "role": "system",
+            "content": "Generate a challenging multiple choice question for UPSC/SSC CGL exam preparation. Follow this EXACT format and example:\n\nExample Output:\nWho was the first President of India?\nभारत के प्रथम राष्ट्रपति कौन थे?\n\nA) Dr. Rajendra Prasad / डॉ राजेंद्र प्रसाद\nB) Jawaharlal Nehru / जवाहरलाल नेहरू\nC) Sardar Vallabhbhai Patel / सरदार वल्लभभाई पटेल\nD) Dr. A.P.J. Abdul Kalam / डॉ ए पी जे अब्दुल कलाम\n\nCorrect: A\n\nRequirements:\n1. Generate ONLY tough, high-difficulty questions that require deep understanding of the subject\n2. Take reference from standard UPSC and SSC CGL preparation books and past exam papers\n3. NEVER repeat questions that are commonly asked; create unique questions that test advanced concepts\n4. Use high-level question-forming techniques with complex distractors that require critical thinking\n5. Cover ALL subjects relevant to UPSC/SSC CGL: Indian History, Geography, Polity, Economics, Science, Current Affairs, Reasoning, Quantitative Aptitude, English, etc.\n6. Question MUST be shown in both English and Hindi with accurate translations\n7. Hindi translation must be grammatically correct\n8. Each option MUST have both English and Hindi versions separated by ' / '\n9. Options MUST start with A), B), C), D) followed by a space\n10. Use proper Hindi Unicode characters\n11. Keep formatting consistent throughout"
+        }
+        
+        # Add recent questions as examples of what not to repeat (if available)
+        recent_questions = []
+        if num_previous_questions > 0:
+            # Get the 5 most recent questions or all if less than 5
+            recent_count = min(5, num_previous_questions)
+            recent_questions = db["questions"][-recent_count:]
+            
+        avoid_message = None
+        if recent_questions:
+            avoid_content = "DO NOT repeat these recently asked questions or anything too similar:\n\n"
+            for i, q in enumerate(recent_questions):
+                avoid_content += f"{i+1}. {q['question']}\n\n"
+            
+            avoid_message = {
                 "role": "system",
-                "content": "Generate a multiple choice question for UPSC/SSC CGL exam preparation. Follow this EXACT format and example:\n\nExample Output:\nWho was the first President of India?\nभारत के प्रथम राष्ट्रपति कौन थे?\n\nA) Dr. Rajendra Prasad / डॉ राजेंद्र प्रसाद\nB) Jawaharlal Nehru / जवाहरलाल नेहरू\nC) Sardar Vallabhbhai Patel / सरदार वल्लभभाई पटेल\nD) Dr. A.P.J. Abdul Kalam / डॉ ए पी जे अब्दुल कलाम\n\nCorrect: A\n\nRequirements:\n1. Question MUST be shown in both English and Hindi\n2. Hindi translation must be accurate and grammatically correct\n3. Each option MUST have both English and Hindi versions separated by ' / '\n4. Options MUST start with A), B), C), D) followed by a space\n5. Topics: Indian History, Geography, Polity, Economics, or Current Affairs\n6. Use proper Hindi Unicode characters\n7. Keep formatting consistent throughout"
-            }],
-            temperature=0.7,
-            max_tokens=400
-        )
+                "content": avoid_content
+            }
+        
+        # Construct the messages array
+        messages = [context_message, instruction_message]
+        if avoid_message:
+            messages.append(avoid_message)
+        
+        response = client.chat.completions.create(
+             model="gpt-3.5-turbo",
+             messages=messages,
+             temperature=0.7,
+             max_tokens=400
+         )
         
         question_text = response.choices[0].message.content.strip()
         
@@ -125,6 +207,11 @@ async def send_quiz(bot):
         if not all([question, options, correct_index is not None]):
             logger.error("Failed to generate valid quiz question, skipping this attempt")
             return
+        
+        # Save the question to our database to avoid repetition
+        is_new = save_question_to_db(question)
+        if not is_new:
+            logger.warning("Generated question was too similar to a previous one, but proceeding anyway")
             
         logger.info(f"Sending quiz: {question[:50]}...")
         await bot.send_poll(
